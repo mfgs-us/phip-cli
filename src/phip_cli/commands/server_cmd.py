@@ -17,10 +17,12 @@ from phip_cli.http import (
     get_history,
     get_meta,
     get_object,
+    iter_history,
     push_event,
     query_namespace,
 )
 from phip_cli.identity import load_identity
+from phip_cli.output import add_format_flag, emit
 from phip_cli.remote import Remote, load_remote
 
 
@@ -39,6 +41,7 @@ def add(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     g.add_argument("uri", help="phip:// URI.")
     g.add_argument("--remote", help="Remote name (defaults to current default).")
     g.add_argument("--history", type=int, default=10, help="History tail length.")
+    add_format_flag(g)
     g.set_defaults(func=run_get)
 
     h = sub.add_parser("history", help="Fetch full event history (paginated).")
@@ -46,6 +49,10 @@ def add(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     h.add_argument("--remote")
     h.add_argument("--limit", type=int)
     h.add_argument("--cursor")
+    h.add_argument(
+        "--all", action="store_true", help="Walk every page, not just the first."
+    )
+    add_format_flag(h)
     h.set_defaults(func=run_history)
 
     c = sub.add_parser("create", help="Push a signed `created` event to the remote.")
@@ -65,10 +72,12 @@ def add(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     q.add_argument("--state", help="Filter by state.")
     q.add_argument("--prefix", dest="phip_id_prefix", help="Filter by phip_id prefix.")
     q.add_argument("--limit", type=int, default=50)
+    add_format_flag(q)
     q.set_defaults(func=run_query)
 
     m = sub.add_parser("meta", help="Fetch /.well-known/phip/meta from the remote.")
     m.add_argument("--remote")
+    add_format_flag(m)
     m.set_defaults(func=run_meta)
 
     w = sub.add_parser("whoami", help="Show the default identity + default remote.")
@@ -107,14 +116,95 @@ def _wrap_http(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> int:
     return 0
 
 
+def _emit_or_error(fn: Callable[..., Any], fmt: str, table_args: dict[str, Any] | None = None,
+                   *args: Any, **kwargs: Any) -> int:
+    try:
+        result = fn(*args, **kwargs)
+    except HTTPError as e:
+        print(
+            f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
+            file=sys.stderr,
+        )
+        return 1
+    if table_args is not None:
+        emit(result, fmt, **table_args)
+    else:
+        emit(result, fmt)
+    return 0
+
+
 def run_get(args: argparse.Namespace) -> int:
     rem = _resolve_remote(args.remote)
-    return _wrap_http(get_object, rem, args.uri, history=args.history)
+    table_rows = None
+    table_columns = None
+    if args.format == "table":
+        # For an object response, project the history list as the table.
+        try:
+            obj = get_object(rem, args.uri, history=args.history)
+        except HTTPError as e:
+            print(
+                f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
+                file=sys.stderr,
+            )
+            return 1
+        history = obj.get("history") or []
+        table_rows = [
+            {
+                "ts": ev.get("timestamp", ""),
+                "type": ev.get("type", ""),
+                "id": str(ev.get("event_id", ""))[:8],
+                "actor": ev.get("actor", ""),
+            }
+            for ev in history
+        ]
+        table_columns = ["ts", "type", "id", "actor"]
+        print(f"{obj.get('phip_id')}")
+        print(
+            f"  type={obj.get('object_type')} state={obj.get('state')} "
+            f"events={obj.get('history_length')}"
+        )
+        print()
+        emit(obj, "table", table_rows=table_rows, table_columns=table_columns)
+        return 0
+    return _emit_or_error(get_object, args.format, None, rem, args.uri, history=args.history)
 
 
 def run_history(args: argparse.Namespace) -> int:
     rem = _resolve_remote(args.remote)
-    return _wrap_http(get_history, rem, args.uri, limit=args.limit, cursor=args.cursor)
+    if args.all:
+        try:
+            events = list(iter_history(rem, args.uri, page_size=args.limit))
+        except HTTPError as e:
+            print(
+                f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
+                file=sys.stderr,
+            )
+            return 1
+        body = {"phip_id": args.uri, "history_length": len(events), "events": events}
+    else:
+        try:
+            body = get_history(rem, args.uri, limit=args.limit, cursor=args.cursor)
+        except HTTPError as e:
+            print(
+                f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
+                file=sys.stderr,
+            )
+            return 1
+
+    if args.format == "table":
+        rows = [
+            {
+                "ts": ev.get("timestamp", ""),
+                "type": ev.get("type", ""),
+                "id": str(ev.get("event_id", ""))[:8],
+                "actor": ev.get("actor", ""),
+            }
+            for ev in body.get("events", [])
+        ]
+        emit(body, "table", table_rows=rows, table_columns=["ts", "type", "id", "actor"])
+    else:
+        emit(body, args.format)
+    return 0
 
 
 def run_create(args: argparse.Namespace) -> int:
@@ -151,12 +241,42 @@ def run_query(args: argparse.Namespace) -> int:
         body["state"] = args.state
     if args.phip_id_prefix:
         body["phip_id_prefix"] = args.phip_id_prefix
-    return _wrap_http(query_namespace, rem, args.namespace, body)
+    try:
+        result = query_namespace(rem, args.namespace, body)
+    except HTTPError as e:
+        print(
+            f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
+            file=sys.stderr,
+        )
+        return 1
+    if args.format == "table":
+        rows = [
+            {
+                "phip_id": r.get("phip_id", ""),
+                "type": r.get("object_type", ""),
+                "state": r.get("state", ""),
+                "events": r.get("history_length", ""),
+            }
+            for r in result.get("results", [])
+        ]
+        emit(result, "table", table_rows=rows, table_columns=["phip_id", "type", "state", "events"])
+    else:
+        emit(result, args.format)
+    return 0
 
 
 def run_meta(args: argparse.Namespace) -> int:
     rem = _resolve_remote(args.remote)
-    return _wrap_http(get_meta, rem)
+    try:
+        result = get_meta(rem)
+    except HTTPError as e:
+        print(
+            f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
+            file=sys.stderr,
+        )
+        return 1
+    emit(result, args.format)
+    return 0
 
 
 def run_whoami(args: argparse.Namespace) -> int:  # noqa: ARG001

@@ -6,7 +6,18 @@ import argparse
 import contextlib
 import sys
 
-from phip_cli.commands import init_cmd, key_cmd, plumbing_cmd, remote_cmd, server_cmd
+from phip_cli.commands import (
+    blob_cmd,
+    bundle_cmd,
+    init_cmd,
+    key_cmd,
+    log_cmd,
+    plumbing_cmd,
+    remote_cmd,
+    server_cmd,
+    show_cmd,
+    verify_cmd,
+)
 
 
 def _force_utf8_stdio() -> None:
@@ -35,6 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
     key_cmd.add(sub)
     remote_cmd.add(sub)
     server_cmd.add(sub)
+    blob_cmd.add(sub)
+    log_cmd.add(sub)
+    verify_cmd.add(sub)
+    show_cmd.add(sub)
+    bundle_cmd.add(sub)
     plumbing_cmd.add(sub)
 
     return p

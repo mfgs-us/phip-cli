@@ -120,3 +120,29 @@ def get_blob(remote: Remote, sha256_hex: str) -> bytes:
         if resp.status_code >= 400:
             _check(resp)
         return resp.content
+
+
+def head_hash_of(remote: Remote, phip_uri: str) -> str:
+    """Convenience: fetch the current head_hash for an object. Returns
+    'genesis' if the object doesn't exist yet."""
+    try:
+        obj = get_object(remote, phip_uri, history=0)
+    except HTTPError as e:
+        if e.code == "OBJECT_NOT_FOUND":
+            return "genesis"
+        raise
+    head: str = obj.get("head_hash", "genesis")
+    return head
+
+
+def iter_history(
+    remote: Remote, phip_uri: str, *, page_size: int | None = None
+) -> Any:
+    """Yield events one page at a time, following next_cursor until exhausted."""
+    cursor: str | None = None
+    while True:
+        page = get_history(remote, phip_uri, limit=page_size, cursor=cursor)
+        yield from page.get("events", [])
+        cursor = page.get("next_cursor")
+        if cursor is None:
+            break

@@ -1,4 +1,4 @@
-# phip-cli
+# phip-cli (`phip`)
 
 [![CI](https://github.com/mfgs-us/phip-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/mfgs-us/phip-cli/actions/workflows/ci.yml)
 [![spec](https://img.shields.io/badge/spec-v0.1.0--draft-blue)](https://github.com/mfgs-us/phip)
@@ -30,8 +30,10 @@ git clone https://github.com/mfgs-us/phip-server
 cd phip-server && docker compose up -d
 cd ..
 
-# Init identity + register the local server
+# Init identity + register the local server, then register your key
+# with that server so subsequent pushes can be verified
 phip init --remote http://localhost:8080 --authority localhost
+phip key register
 
 # Inspect state
 phip whoami
@@ -40,7 +42,7 @@ phip key list
 
 # Hit the server
 phip meta
-phip query parts --type component
+phip query parts --type component --table
 
 # Build, sign, and create an object
 phip event new \
@@ -50,17 +52,19 @@ phip event new \
 phip event sign widget.json > widget.signed.json
 phip create widget.signed.json
 
-# Read it back
-phip get phip://localhost/parts/widget-001
+# Append a measurement: file -> blob -> signed event -> push, in one shot
+phip log phip://localhost/parts/widget-001 ./tek_sweep.csv \
+  --metric freq_response --value 2.5e6 --unit Hz --rig bench-2
 
-# Append a measurement
-phip event new \
-  --phip-id phip://localhost/parts/widget-001 \
-  --type measurement \
-  --previous-hash $(phip get phip://localhost/parts/widget-001 | jq -r .head_hash) \
-  --payload '{"metric":"freq_response","value":2.5e6,"unit":"Hz","as_of":"2026-05-10T20:00:00Z"}' \
-  | phip event sign - \
-  | phip push -
+# Read it back, formatted
+phip show phip://localhost/parts/widget-001 --table
+
+# Re-walk the entire chain client-side and re-validate signatures
+phip verify phip://localhost/parts/widget-001
+
+# Pack a portable, signed bundle of one object's full history
+# (drop on GitHub Pages → anyone can `phip bundle verify` it offline)
+phip bundle pack phip://localhost/parts/widget-001 --out widget.phip-bundle
 ```
 
 ## Commands
@@ -80,6 +84,7 @@ phip event new \
 | `phip key list` | List local identities |
 | `phip key show <name>` | Print JWK + URI |
 | `phip key use <name>` | Set the default identity |
+| `phip key register [name] [--remote X]` | Push the bootstrap actor event for an identity to a remote (required before any other PUSH from that key can be verified) |
 
 ### Remotes
 
@@ -97,12 +102,38 @@ phip event new \
 |---|---|
 | `phip meta` | `GET /.well-known/phip/meta` |
 | `phip get <phip-uri>` | `GET /resolve/...` — current state + history tail |
-| `phip history <phip-uri>` | Paginated event history |
+| `phip history <phip-uri> [--all]` | Paginated event history; `--all` walks every page |
+| `phip show <phip-uri> [--all]` | Formatted, human-readable history view |
 | `phip create <event-file>` | `POST /objects/{namespace}` for a `created` event |
 | `phip push <event-file>` | `POST /push/{namespace}/{local_id}` for any other event |
+| `phip log <phip-uri> <file> --metric M [...]` | Composite: hash blob → upload → fetch head → sign measurement → push, all in one command |
 | `phip query <namespace> [--type/--state/--prefix]` | `POST /query/{namespace}` |
+| `phip verify <phip-uri>` | Fetch full chain, re-walk + re-validate every signature client-side |
+| `phip blob put <file>` | Hash + upload a file; prints sha256 |
+| `phip blob get <sha256> [--out FILE]` | Download a blob |
 
 Event files can be `-` to read from stdin (useful in pipes).
+
+Every read-side command (`get`, `history`, `query`, `meta`, `show`)
+takes `--format json|yaml|table`, with `--yaml` and `--table` as
+shorthand. Default is `json`.
+
+### Bundles (offline, federation-ready)
+
+| Command | What it does |
+|---|---|
+| `phip bundle pack <phip-uri> [...] --out FILE` | Fetch one or more objects + full history from the remote, sign as producer, write a self-contained `.phip-bundle` |
+| `phip bundle unpack <FILE>` | Print bundle manifest + contents |
+| `phip bundle verify <FILE>` | Full integrity check (manifest signature + every event chain link + every event signature), no network required |
+
+The "publish a transducer's full provenance alongside a paper" workflow:
+
+```bash
+phip bundle pack phip://acme.example/elements/transducer-047 \
+    --out site/transducer-047.phip-bundle
+# scp / git push site/ → anywhere static
+# Reader runs: phip bundle verify transducer-047.phip-bundle
+```
 
 ### Plumbing
 

@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "phip>=0.1.0a2",
     "httpx>=0.27",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -65,3 +66,7 @@ python_version = "3.10"
 strict = true
 warn_return_any = false
 disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true

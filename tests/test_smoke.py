@@ -263,3 +263,500 @@ async def test_http_error_surfaces_phip_code(
     assert rc == 1
     err = capsys.readouterr().err
     assert "OBJECT_NOT_FOUND" in err
+
+
+# ── New commands ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_key_register(home: Path, httpx_mock, capsys: pytest.CaptureFixture) -> None:
+    """`key register` posts a self-signed bootstrap actor event for the
+    default identity. Inspect the captured request body to confirm shape."""
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/objects/keys",
+        method="POST",
+        json={
+            "phip_id": "phip://test.local/keys/default",
+            "head_hash": "sha256:x",
+            "history_length": 1,
+        },
+    )
+    capsys.readouterr()
+    assert main(["key", "register"]) == 0
+
+    # Inspect the request body the CLI sent.
+    requests = httpx_mock.get_requests(
+        url="https://acme.example/.well-known/phip/objects/keys"
+    )
+    assert len(requests) == 1
+    body = json.loads(requests[0].content)
+    assert body["type"] == "created"
+    assert body["actor"] == body["phip_id"] == "phip://test.local/keys/default"
+    assert body["previous_hash"] == "genesis"
+    assert body["payload"]["object_type"] == "actor"
+    assert body["payload"]["state"] == "active"
+    assert "phip:keys" in body["payload"]["attributes"]
+    assert "signature" in body
+
+
+@pytest.mark.asyncio
+async def test_key_register_already_exists_is_ok(
+    home: Path, httpx_mock, capsys: pytest.CaptureFixture
+) -> None:
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/objects/keys",
+        method="POST",
+        status_code=409,
+        json={"detail": {"error": {"code": "OBJECT_EXISTS", "message": "already there"}}},
+    )
+    rc = main(["key", "register"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "already registered" in out
+
+
+# ── blob put / get ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_blob_put_hashes_and_uploads(
+    home: Path, tmp_path: Path, httpx_mock, capsys: pytest.CaptureFixture
+) -> None:
+    import hashlib
+
+    payload = b"hello blob world"
+    digest = hashlib.sha256(payload).hexdigest()
+    f = tmp_path / "data.bin"
+    f.write_bytes(payload)
+
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    httpx_mock.add_response(
+        url=f"https://acme.example/.well-known/phip/blobs/{digest}",
+        method="PUT",
+        json={
+            "sha256": digest,
+            "size_bytes": len(payload),
+            "media_type": "application/octet-stream",
+        },
+    )
+    capsys.readouterr()
+    assert main(["blob", "put", str(f)]) == 0
+    assert capsys.readouterr().out.strip() == digest
+
+
+@pytest.mark.asyncio
+async def test_blob_get_writes_content(
+    home: Path, tmp_path: Path, httpx_mock, capsys: pytest.CaptureFixture
+) -> None:
+    payload = b"the bytes"
+    digest = "a" * 64  # bogus, server doesn't actually validate on the mocked GET
+    httpx_mock.add_response(
+        url=f"https://acme.example/.well-known/phip/blobs/{digest}",
+        method="GET",
+        content=payload,
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+
+    out = tmp_path / "got.bin"
+    capsys.readouterr()
+    assert main(["blob", "get", digest, "--out", str(out)]) == 0
+    assert out.read_bytes() == payload
+
+
+# ── log composite ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_log_composite(
+    home: Path, tmp_path: Path, httpx_mock, capsys: pytest.CaptureFixture
+) -> None:
+    import hashlib
+
+    sweep = tmp_path / "sweep.csv"
+    sweep.write_text("a,b\n1,2\n", encoding="utf-8")
+    digest = hashlib.sha256(sweep.read_bytes()).hexdigest()
+
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+
+    # 1. Blob PUT
+    httpx_mock.add_response(
+        url=f"https://acme.example/.well-known/phip/blobs/{digest}",
+        method="PUT",
+        json={"sha256": digest, "size_bytes": 8, "media_type": "text/csv"},
+    )
+    # 2. Resolve current head
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/resolve/parts/widget-001?history=0",
+        method="GET",
+        json={
+            "phip_id": "phip://acme.example/parts/widget-001",
+            "object_type": "component",
+            "state": "concept",
+            "head_hash": "sha256:abc123",
+            "history_length": 1,
+            "history": [],
+        },
+    )
+    # 3. Push the measurement
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/push/parts/widget-001",
+        method="POST",
+        json={
+            "phip_id": "phip://acme.example/parts/widget-001",
+            "head_hash": "sha256:def456",
+            "history_length": 2,
+        },
+    )
+
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "log",
+                "phip://acme.example/parts/widget-001",
+                str(sweep),
+                "--metric", "freq_response",
+                "--value", "2.5e6",
+                "--unit", "Hz",
+                "--rig", "bench-2",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "Logged freq_response" in out
+    assert "head_hash:   sha256:def456" in out
+
+    # Inspect the push body to confirm the measurement payload shape.
+    pushes = httpx_mock.get_requests(
+        url="https://acme.example/.well-known/phip/push/parts/widget-001"
+    )
+    assert len(pushes) == 1
+    pushed = json.loads(pushes[0].content)
+    assert pushed["type"] == "measurement"
+    assert pushed["previous_hash"] == "sha256:abc123"
+    assert pushed["payload"]["metric"] == "freq_response"
+    assert pushed["payload"]["value"] == 2.5e6
+    assert pushed["payload"]["unit"] == "Hz"
+    assert pushed["payload"]["rig"] == "bench-2"
+    assert pushed["payload"]["external_ref"]["content_hash"] == f"sha256:{digest}"
+    assert "signature" in pushed
+
+
+# ── verify ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_verify_valid_chain(
+    home: Path, httpx_mock, capsys: pytest.CaptureFixture
+) -> None:
+    """Build a real signed chain locally, mock the server returning it,
+    and confirm verify walks it cleanly."""
+    import uuid
+    from datetime import datetime, timezone
+
+    from phip import generate_keypair, hash_event, sign_event
+
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+
+    kp = generate_keypair()
+    actor_uri = "phip://acme.example/keys/alice"
+    obj_uri = "phip://acme.example/parts/widget-001"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Bootstrap actor event (self-signed).
+    actor_ev = sign_event(
+        {
+            "event_id": str(uuid.uuid4()),
+            "phip_id": actor_uri,
+            "type": "created",
+            "timestamp": now,
+            "actor": actor_uri,
+            "previous_hash": "genesis",
+            "payload": {
+                "object_type": "actor",
+                "state": "active",
+                "attributes": {
+                    "phip:keys": {
+                        **kp.jwk,
+                        "use": "sig",
+                        "key_ops": ["verify"],
+                        "not_before": "2020-01-01T00:00:00Z",
+                        "not_after": "2099-01-01T00:00:00Z",
+                    }
+                },
+            },
+        },
+        kp.private,
+        actor_uri,
+    )
+
+    # Object events: created → measurement, all signed by actor.
+    obj_created = sign_event(
+        {
+            "event_id": str(uuid.uuid4()),
+            "phip_id": obj_uri,
+            "type": "created",
+            "timestamp": now,
+            "actor": actor_uri,
+            "previous_hash": "genesis",
+            "payload": {"object_type": "component", "state": "concept"},
+        },
+        kp.private,
+        actor_uri,
+    )
+    obj_meas = sign_event(
+        {
+            "event_id": str(uuid.uuid4()),
+            "phip_id": obj_uri,
+            "type": "measurement",
+            "timestamp": now,
+            "actor": actor_uri,
+            "previous_hash": hash_event(obj_created),
+            "payload": {"metric": "x", "as_of": now, "value": 1.0, "unit": "Hz"},
+        },
+        kp.private,
+        actor_uri,
+    )
+
+    # Mock history endpoint (single page).
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/history/parts/widget-001",
+        method="GET",
+        json={
+            "phip_id": obj_uri,
+            "history_length": 2,
+            "events": [obj_created, obj_meas],
+            "next_cursor": None,
+        },
+    )
+    # Mock the actor lookup (the verify command resolves the signing key).
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/resolve/keys/alice?history=1",
+        method="GET",
+        json={
+            "phip_id": actor_uri,
+            "object_type": "actor",
+            "state": "active",
+            "head_hash": hash_event(actor_ev),
+            "history_length": 1,
+            "history": [actor_ev],
+        },
+    )
+
+    capsys.readouterr()
+    assert main(["verify", obj_uri]) == 0
+    out = capsys.readouterr().out
+    assert "events checked: 2" in out
+    assert "events passed:  2" in out
+    assert "OK: chain valid" in out
+
+
+# ── show ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_show_table_format(
+    home: Path, httpx_mock, capsys: pytest.CaptureFixture
+) -> None:
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/resolve/parts/widget-001?history=10",
+        json={
+            "phip_id": "phip://acme.example/parts/widget-001",
+            "object_type": "component",
+            "state": "concept",
+            "history_length": 1,
+            "head_hash": "sha256:x",
+            "history": [
+                {
+                    "event_id": "abcd-1234",
+                    "type": "created",
+                    "timestamp": "2026-05-10T12:00:00Z",
+                    "actor": "phip://acme.example/keys/alice",
+                    "payload": {"object_type": "component", "state": "concept"},
+                }
+            ],
+        },
+    )
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    capsys.readouterr()
+    assert main(["show", "phip://acme.example/parts/widget-001", "--table"]) == 0
+    out = capsys.readouterr().out
+    assert "phip://acme.example/parts/widget-001" in out
+    assert "events=1" in out
+    assert "ts" in out and "type" in out
+    assert "created" in out
+    assert "abcd-123" in out  # first 8 chars of event_id "abcd-1234"
+
+
+# ── bundle round-trip (offline) ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bundle_pack_unpack_verify(
+    home: Path, tmp_path: Path, httpx_mock, capsys: pytest.CaptureFixture
+) -> None:
+    """Pack a real bundle from a server-mocked object, then unpack +
+    verify it with no network."""
+    import uuid
+    from datetime import datetime, timezone
+
+    from phip import hash_event, sign_event
+
+    # Build a small chain that the CLI's identity can sign.
+    assert main(["init", "--authority", "acme.example", "--remote", "https://acme.example"]) == 0
+    # Reload the identity that init created — pack must use it as producer.
+    from phip_cli.config import paths as _paths
+    from phip_cli.identity import load_identity
+
+    ident = load_identity(_paths(), "default")
+
+    obj_uri = "phip://acme.example/parts/widget-001"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    obj_created = sign_event(
+        {
+            "event_id": str(uuid.uuid4()),
+            "phip_id": obj_uri,
+            "type": "created",
+            "timestamp": now,
+            "actor": ident.key_id,
+            "previous_hash": "genesis",
+            "payload": {"object_type": "component", "state": "concept"},
+        },
+        ident.keypair.private,
+        ident.key_id,
+    )
+    head_hash = hash_event(obj_created)
+
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/resolve/parts/widget-001?history=0",
+        json={
+            "phip_id": obj_uri,
+            "object_type": "component",
+            "state": "concept",
+            "head_hash": head_hash,
+            "history_length": 1,
+            "history": [],
+        },
+    )
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/history/parts/widget-001",
+        json={
+            "phip_id": obj_uri,
+            "history_length": 1,
+            "events": [obj_created],
+            "next_cursor": None,
+        },
+    )
+
+    out_bundle = tmp_path / "widget.phip-bundle"
+    capsys.readouterr()
+    assert main(["bundle", "pack", obj_uri, "--out", str(out_bundle)]) == 0
+    assert out_bundle.exists() and out_bundle.stat().st_size > 0
+
+    capsys.readouterr()
+    assert main(["bundle", "unpack", str(out_bundle)]) == 0
+    out = capsys.readouterr().out
+    assert "objects:         1" in out
+    assert "events:          1" in out
+    assert obj_uri in out
+
+    capsys.readouterr()
+    assert main(["bundle", "verify", str(out_bundle)]) == 0
+    assert "OK: bundle valid" in capsys.readouterr().out
+
+
+# ── history --all + format flags ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_history_all_walks_pages(
+    home: Path, httpx_mock, capsys: pytest.CaptureFixture
+) -> None:
+    # Page 1
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/history/parts/widget-001",
+        json={
+            "phip_id": "phip://acme.example/parts/widget-001",
+            "history_length": 5,
+            "events": [
+                {"event_id": "id1", "type": "created", "timestamp": "t1", "actor": "a"},
+                {"event_id": "id2", "type": "measurement", "timestamp": "t2", "actor": "a"},
+            ],
+            "next_cursor": "2",
+        },
+    )
+    # Page 2
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/history/parts/widget-001?cursor=2",
+        json={
+            "phip_id": "phip://acme.example/parts/widget-001",
+            "history_length": 5,
+            "events": [
+                {"event_id": "id3", "type": "measurement", "timestamp": "t3", "actor": "a"},
+                {"event_id": "id4", "type": "measurement", "timestamp": "t4", "actor": "a"},
+                {"event_id": "id5", "type": "measurement", "timestamp": "t5", "actor": "a"},
+            ],
+            "next_cursor": None,
+        },
+    )
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    capsys.readouterr()
+    assert main(["history", "phip://acme.example/parts/widget-001", "--all"]) == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert len(payload["events"]) == 5
+    assert payload["events"][0]["event_id"] == "id1"
+    assert payload["events"][-1]["event_id"] == "id5"
+
+
+@pytest.mark.asyncio
+async def test_query_table(home: Path, httpx_mock, capsys: pytest.CaptureFixture) -> None:
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/query/parts",
+        method="POST",
+        json={
+            "results": [
+                {
+                    "phip_id": "phip://acme.example/parts/widget-001",
+                    "object_type": "component",
+                    "state": "concept",
+                    "head_hash": "sha256:x",
+                    "history_length": 3,
+                },
+                {
+                    "phip_id": "phip://acme.example/parts/widget-002",
+                    "object_type": "component",
+                    "state": "qualified",
+                    "head_hash": "sha256:y",
+                    "history_length": 7,
+                },
+            ],
+            "next_cursor": None,
+        },
+    )
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    capsys.readouterr()
+    assert main(["query", "parts", "--table"]) == 0
+    out = capsys.readouterr().out
+    # Header line + separator + 2 rows
+    assert "phip_id" in out
+    assert "widget-001" in out and "widget-002" in out
+    assert "concept" in out and "qualified" in out
+
+
+def test_meta_yaml(home: Path, httpx_mock, capsys: pytest.CaptureFixture) -> None:
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/meta",
+        json={"authority": "acme.example", "protocol_versions": ["0.1.0-draft"]},
+    )
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    capsys.readouterr()
+    assert main(["meta", "--yaml"]) == 0
+    out = capsys.readouterr().out
+    assert "authority: acme.example" in out
+    assert "protocol_versions:" in out
