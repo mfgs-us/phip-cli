@@ -15,6 +15,11 @@ implementation of the protocol primitives, used everywhere.
 > **Status:** `0.0.1` alpha. Mirrors the v0.1.0-draft spec. Expect
 > breaking changes.
 
+> **Tutorial:** [TUTORIAL.md](./TUTORIAL.md) walks through the full
+> workflow (server → init → register → object → log → verify → bundle)
+> with copy-paste commands. Shell scripts in
+> [`examples/`](./examples/).
+
 ## Install
 
 ```bash

@@ -18,6 +18,7 @@ from phip_cli.commands.server_cmd import _resolve_remote
 from phip_cli.config import load_config, paths
 from phip_cli.http import HTTPError, get_object, iter_history
 from phip_cli.identity import load_identity
+from phip_cli.uri import expand
 
 
 def add(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -60,17 +61,21 @@ def run_pack(args: argparse.Namespace) -> int:
         print(str(e), file=sys.stderr)
         return 1
 
-    # Resolve the source authority from the first URI; bundles are
-    # single-authority per the spec.
+    # Expand shorthand IDs (e.g. `widget-001`) and pull out the
+    # source authority — bundles are single-authority per the spec.
     from phip import parse_uri
 
-    parsed = parse_uri(args.phip_uri[0])
-    source_authority = parsed.authority
+    try:
+        expanded_uris = [expand(u, p, cfg) for u in args.phip_uri]
+    except SystemExit as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    source_authority = parse_uri(expanded_uris[0]).authority
 
     objects: list[dict[str, object]] = []
     chains: dict[str, list[dict[str, object]]] = {}
     try:
-        for uri in args.phip_uri:
+        for uri in expanded_uris:
             obj = get_object(remote, uri, history=0)
             objects.append(
                 {

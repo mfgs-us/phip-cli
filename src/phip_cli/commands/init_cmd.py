@@ -30,18 +30,20 @@ def run(args: argparse.Namespace) -> int:
     p.root.mkdir(parents=True, exist_ok=True)
     p.keys_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine authority for the new identity.
-    authority = args.authority
+    # Resolution order: --authority wins for both identity AND remote.
+    # If --remote-authority is explicit, it overrides the remote half.
+    # If neither --authority nor --remote-authority is given, fall back
+    # to the remote URL's hostname.
+    from urllib.parse import urlparse
+
+    host = urlparse(args.remote).hostname if args.remote else None
+    authority = args.authority or host or "localhost"
     remote_authority: str | None = None
     if args.remote:
-        from urllib.parse import urlparse
-
-        host = urlparse(args.remote).hostname or "localhost"
-        remote_authority = args.remote_authority or host
-        if authority is None:
-            authority = host
-    if authority is None:
-        authority = "localhost"
+        # If the user said --authority X and didn't override --remote-authority,
+        # the remote is presumed authoritative for X. This is what 99% of
+        # users mean when they `phip init --remote URL --authority X`.
+        remote_authority = args.remote_authority or authority
 
     # Generate (or replace) the identity.
     key_path = p.key_file(args.name)

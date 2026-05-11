@@ -821,7 +821,12 @@ async def test_object_new_dry_run(home: Path, capsys: pytest.CaptureFixture) -> 
 async def test_object_new_with_shorthand(
     home: Path, httpx_mock, capsys: pytest.CaptureFixture
 ) -> None:
-    """Shorthand id is expanded against default authority + namespace."""
+    """Shorthand id is expanded against default authority + namespace.
+
+    Note: `phip init --authority X --remote URL` sets BOTH the identity
+    authority and the remote's claimed authority to X — the common case
+    is that the remote at URL is authoritative for X. See init_cmd.py.
+    """
     assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
     main(["config", "set", "default_namespace", "parts"])
     capsys.readouterr()
@@ -830,14 +835,14 @@ async def test_object_new_with_shorthand(
         url="https://acme.example/.well-known/phip/objects/parts",
         method="POST",
         json={
-            "phip_id": "phip://acme.example/parts/widget-001",
+            "phip_id": "phip://test.local/parts/widget-001",
             "head_hash": "sha256:x",
             "history_length": 1,
         },
     )
     assert main(["object", "new", "component", "widget-001"]) == 0
     out = capsys.readouterr().out
-    assert "Created phip://acme.example/parts/widget-001" in out
+    assert "Created phip://test.local/parts/widget-001" in out
 
 
 @pytest.mark.asyncio
@@ -1065,6 +1070,100 @@ async def test_push_dry_run_does_not_call_server(
 
 
 # ── Shell completion ────────────────────────────────────────────────
+
+
+def test_init_propagates_authority_to_remote(
+    home: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """`phip init --authority X --remote URL` should set the remote's
+    authority to X (not derive from URL host). Otherwise every CREATE
+    fails FOREIGN_NAMESPACE — which was a real bug."""
+    assert main(["init", "--authority", "tutorial.local", "--remote", "http://localhost:8080"]) == 0
+    remotes = json.loads((home / "remotes.json").read_text("utf-8"))
+    assert remotes[0]["authority"] == "tutorial.local"
+
+
+def test_init_explicit_remote_authority_wins(
+    home: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """If --remote-authority is explicit, it overrides --authority."""
+    assert (
+        main(
+            [
+                "init",
+                "--authority", "client.example",
+                "--remote", "http://localhost:8080",
+                "--remote-authority", "server.example",
+            ]
+        )
+        == 0
+    )
+    remotes = json.loads((home / "remotes.json").read_text("utf-8"))
+    assert remotes[0]["authority"] == "server.example"
+
+
+@pytest.mark.asyncio
+async def test_bundle_pack_accepts_shorthand(
+    home: Path, tmp_path: Path, httpx_mock, capsys: pytest.CaptureFixture
+) -> None:
+    """`phip bundle pack widget-001` should expand against config defaults
+    rather than failing with `not a valid PhIP URI`."""
+    import uuid
+    from datetime import datetime, timezone
+
+    from phip import hash_event, sign_event
+
+    assert main(["init", "--authority", "tutorial.local", "--remote", "http://localhost:8080"]) == 0
+    main(["config", "set", "default_namespace", "elements"])
+    capsys.readouterr()
+
+    # Reuse the freshly-generated default identity to sign the bundle.
+    from phip_cli.config import paths as _paths
+    from phip_cli.identity import load_identity
+
+    ident = load_identity(_paths(), "default")
+    obj_uri = "phip://tutorial.local/elements/widget-001"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    created = sign_event(
+        {
+            "event_id": str(uuid.uuid4()),
+            "phip_id": obj_uri,
+            "type": "created",
+            "timestamp": now,
+            "actor": ident.key_id,
+            "previous_hash": "genesis",
+            "payload": {"object_type": "component", "state": "concept"},
+        },
+        ident.keypair.private,
+        ident.key_id,
+    )
+
+    httpx_mock.add_response(
+        url="http://localhost:8080/.well-known/phip/resolve/elements/widget-001?history=0",
+        json={
+            "phip_id": obj_uri,
+            "object_type": "component",
+            "state": "concept",
+            "head_hash": hash_event(created),
+            "history_length": 1,
+            "history": [],
+        },
+    )
+    httpx_mock.add_response(
+        url="http://localhost:8080/.well-known/phip/history/elements/widget-001",
+        json={
+            "phip_id": obj_uri,
+            "history_length": 1,
+            "events": [created],
+            "next_cursor": None,
+        },
+    )
+
+    out_bundle = tmp_path / "widget.phip-bundle"
+    capsys.readouterr()
+    # Shorthand id, not a full phip:// URI.
+    assert main(["bundle", "pack", "widget-001", "--out", str(out_bundle)]) == 0
+    assert out_bundle.exists() and out_bundle.stat().st_size > 0
 
 
 def test_completion_bash(capsys: pytest.CaptureFixture) -> None:
