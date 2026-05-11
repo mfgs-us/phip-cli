@@ -75,6 +75,10 @@ phip bundle pack phip://localhost/parts/widget-001 --out widget.phip-bundle
 |---|---|
 | `phip init [--remote URL] [--authority X]` | Create `~/.phip/`, generate a key, optionally register a remote |
 | `phip whoami` | Show the current default identity + remote |
+| `phip --version` | Print phip-cli + phip-py versions |
+| `phip -v / -vv` | Verbose / debug logging (httpx wire on `-vv`) |
+| `phip config get/set/unset/list` | Read/write fields in `~/.phip/config.json` (e.g. `default_namespace`, `default_authority`) |
+| `phip completion bash\|zsh\|tcsh` | Print a shell completion script |
 
 ### Identities
 
@@ -96,27 +100,58 @@ phip bundle pack phip://localhost/parts/widget-001 --out widget.phip-bundle
 | `phip remote rm <name>` | Delete a remote |
 | `phip remote use <name>` | Set the default remote |
 
+### Object lifecycle (composite write commands)
+
+| Command | What it does |
+|---|---|
+| `phip object new <type> <id-or-uri> [--state X --attributes JSON --notes ...]` | Build + sign + push a `created` event in one step |
+| `phip transition <uri-or-id> --to <state> [--from X --reason ...]` | Push a `transitioned` event (chain head fetched automatically) |
+| `phip relate <src-or-id> <tgt-or-id> --type T` | Push a `relation_added` event linking two objects |
+
+All three accept `--key`, `--remote`, and `--dry-run` (build + sign but don't POST).
+
+Shorthand IDs (e.g. `widget-001`) expand against `default_authority` + `default_namespace` in config.
+
 ### Server integration
 
 | Command | What it does |
 |---|---|
 | `phip meta` | `GET /.well-known/phip/meta` |
-| `phip get <phip-uri>` | `GET /resolve/...` — current state + history tail |
-| `phip history <phip-uri> [--all]` | Paginated event history; `--all` walks every page |
-| `phip show <phip-uri> [--all]` | Formatted, human-readable history view |
-| `phip create <event-file>` | `POST /objects/{namespace}` for a `created` event |
-| `phip push <event-file>` | `POST /push/{namespace}/{local_id}` for any other event |
-| `phip log <phip-uri> <file> --metric M [...]` | Composite: hash blob → upload → fetch head → sign measurement → push, all in one command |
+| `phip get <uri-or-id>` | `GET /resolve/...` — current state + history tail |
+| `phip history <uri-or-id> [--all]` | Paginated event history; `--all` walks every page |
+| `phip show <uri-or-id> [--all]` | Formatted, human-readable history view |
+| `phip create <event-file> [--dry-run]` | `POST /objects/{namespace}` for a pre-signed `created` event |
+| `phip push <event-file> [--dry-run]` | `POST /push/{namespace}/{local_id}` for any other event |
+| `phip log <uri-or-id> <file> --metric M [...]` | Composite: hash blob → upload → fetch head → sign measurement → push, all in one command |
 | `phip query <namespace> [--type/--state/--prefix]` | `POST /query/{namespace}` |
-| `phip verify <phip-uri>` | Fetch full chain, re-walk + re-validate every signature client-side |
+| `phip verify <uri-or-id>` | Fetch full chain, re-walk + re-validate every signature client-side |
 | `phip blob put <file>` | Hash + upload a file; prints sha256 |
 | `phip blob get <sha256> [--out FILE]` | Download a blob |
 
-Event files can be `-` to read from stdin (useful in pipes).
+Event files can be `-` to read from stdin (useful in pipes). Any URI argument accepts the shorthand form when the relevant defaults are set.
 
 Every read-side command (`get`, `history`, `query`, `meta`, `show`)
 takes `--format json|yaml|table`, with `--yaml` and `--table` as
 shorthand. Default is `json`.
+
+### Capability tokens (§11.3)
+
+| Command | What it does |
+|---|---|
+| `phip token mint --scope S --object GLOB --granted-to URI [--ttl-hours H \| --not-before / --expires]` | Mint a signed capability token; prints the bearer-form (base64url) |
+| `phip token decode <token>` | Print the decoded token as JSON |
+| `phip token verify <token> [--against NAME] [--object/--scope/--actor]` | Verify signature + window (and optionally object_filter / scope coverage / granted_to) |
+| `phip token use <token> --remote NAME` | Install the token as the bearer for a remote (overwrites the existing one) |
+
+### Schema validation
+
+| Command | What it does |
+|---|---|
+| `phip schema list` | List vendored JSON Schemas |
+| `phip schema show <name>` | Print one schema |
+| `phip schema validate <file> --schema NAME` | Validate a JSON document against a vendored schema |
+
+Vendored schemas mirror those in the spec repo: `core`, `capability-token`, `bundle-manifest`, `mechanical`, `datacenter`, `software`, `geo`, `access`, `compliance`, `meta`, `authority-transfer-payload`.
 
 ### Bundles (offline, federation-ready)
 

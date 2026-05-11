@@ -29,8 +29,9 @@ from phip_cli.commands.blob_cmd import detect_media_type, hash_file
 from phip_cli.commands.server_cmd import _resolve_remote
 from phip_cli.config import load_config, paths
 from phip_cli.http import HTTPError, head_hash_of, push_event, put_blob
-from phip_cli.identity import load_identity
+from phip_cli.identity import Identity, load_identity
 from phip_cli.remote import Remote
+from phip_cli.uri import expand
 
 
 def add(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -60,11 +61,87 @@ def add(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     )
     p.add_argument("--remote", help="Remote name (defaults to current default).")
     p.add_argument("--key", help="Identity to sign with (defaults to current default).")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build + sign but don't upload blobs or push; print the signed event.",
+    )
     p.set_defaults(func=run)
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _measurement_payload(
+    args: argparse.Namespace,
+    primary: Path,
+    primary_hash: str,
+    primary_media: str,
+    attachments_meta: list[dict[str, object]],
+) -> dict[str, object]:
+    when = args.at or _utc_now_iso()
+    payload: dict[str, object] = {
+        "metric": args.metric,
+        "as_of": when,
+        "external_ref": {
+            "content_hash": f"sha256:{primary_hash}",
+            "media_type": primary_media,
+            "filename": primary.name,
+        },
+    }
+    for k, v in (
+        ("value", args.value),
+        ("unit", args.unit),
+        ("method", args.method),
+        ("rig", args.rig),
+        ("instrument", args.instrument),
+        ("measured_with", args.measured_with),
+        ("notes", args.notes),
+    ):
+        if v is not None:
+            payload[k] = v
+    if attachments_meta:
+        payload["attachments"] = attachments_meta
+    return payload
+
+
+def _run_dry_run(
+    args: argparse.Namespace,
+    ident: Identity,
+    primary: Path,
+    phip_uri: str,
+) -> int:
+    import json as _json
+
+    primary_hash = hash_file(primary)
+    primary_media = args.media_type or detect_media_type(primary)
+    attachments_meta: list[dict[str, object]] = []
+    for att_path in args.attach:
+        att = Path(att_path)
+        if not att.exists():
+            print(f"attachment not found: {att}", file=sys.stderr)
+            return 1
+        attachments_meta.append(
+            {
+                "content_hash": f"sha256:{hash_file(att)}",
+                "media_type": detect_media_type(att),
+                "filename": att.name,
+            }
+        )
+    payload = _measurement_payload(args, primary, primary_hash, primary_media, attachments_meta)
+    unsigned: dict[str, object] = {
+        "event_id": str(uuid.uuid4()),
+        "phip_id": phip_uri,
+        "type": "measurement",
+        "timestamp": _utc_now_iso(),
+        "actor": ident.key_id,
+        "previous_hash": "sha256:DRYRUN-NO-NETWORK-FETCH",
+        "payload": payload,
+    }
+    signed = sign_event(unsigned, ident.keypair.private, ident.key_id)
+    print(_json.dumps(signed, indent=2))
+    return 0
 
 
 def _ingest_blob(
@@ -94,10 +171,19 @@ def run(args: argparse.Namespace) -> int:
         print(str(e), file=sys.stderr)
         return 1
 
+    try:
+        phip_uri = expand(args.phip_uri, p, cfg)
+    except SystemExit as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
     primary = Path(args.file)
     if not primary.exists():
         print(f"file not found: {primary}", file=sys.stderr)
         return 1
+
+    if args.dry_run:
+        return _run_dry_run(args, ident, primary, phip_uri)
 
     try:
         # 1-3. Upload primary + attachments.
@@ -118,40 +204,15 @@ def run(args: argparse.Namespace) -> int:
             )
 
         # 4. Fetch current head from server.
-        prev = head_hash_of(remote, args.phip_uri)
+        prev = head_hash_of(remote, phip_uri)
 
         # 5. Build the measurement payload (spec §11.4.2 + attachments extension).
-        when = args.at or _utc_now_iso()
-        payload: dict[str, object] = {
-            "metric": args.metric,
-            "as_of": when,
-            "external_ref": {
-                "content_hash": f"sha256:{primary_hash}",
-                "media_type": primary_media,
-                "filename": primary.name,
-            },
-        }
-        if args.value is not None:
-            payload["value"] = args.value
-        if args.unit is not None:
-            payload["unit"] = args.unit
-        if args.method is not None:
-            payload["method"] = args.method
-        if args.rig is not None:
-            payload["rig"] = args.rig
-        if args.instrument is not None:
-            payload["instrument"] = args.instrument
-        if args.measured_with is not None:
-            payload["measured_with"] = args.measured_with
-        if args.notes is not None:
-            payload["notes"] = args.notes
-        if attachments_meta:
-            payload["attachments"] = attachments_meta
+        payload = _measurement_payload(args, primary, primary_hash, primary_media, attachments_meta)
 
         # 6. Sign.
         unsigned: dict[str, object] = {
             "event_id": str(uuid.uuid4()),
-            "phip_id": args.phip_uri,
+            "phip_id": phip_uri,
             "type": "measurement",
             "timestamp": _utc_now_iso(),
             "actor": ident.key_id,
@@ -161,7 +222,7 @@ def run(args: argparse.Namespace) -> int:
         signed = sign_event(unsigned, ident.keypair.private, ident.key_id)
 
         # 7. Push.
-        result = push_event(remote, args.phip_uri, signed)
+        result = push_event(remote, phip_uri, signed)
     except HTTPError as e:
         print(
             f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
@@ -169,7 +230,7 @@ def run(args: argparse.Namespace) -> int:
         )
         return 1
 
-    print(f"Logged {args.metric} on {args.phip_uri}")
+    print(f"Logged {args.metric} on {phip_uri}")
     print(f"  blob:        sha256:{primary_hash[:12]}...")
     if attachments_meta:
         print(f"  attachments: {len(attachments_meta)}")

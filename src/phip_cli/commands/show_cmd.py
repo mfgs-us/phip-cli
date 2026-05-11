@@ -7,8 +7,10 @@ import sys
 from typing import Any
 
 from phip_cli.commands.server_cmd import _resolve_remote
+from phip_cli.config import load_config, paths
 from phip_cli.http import HTTPError, get_object, iter_history
 from phip_cli.output import add_format_flag, emit
+from phip_cli.uri import expand
 
 
 def add(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -58,7 +60,10 @@ def _summarize(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def run(args: argparse.Namespace) -> int:
+    p = paths()
+    cfg = load_config(p)
     try:
+        phip_uri = expand(args.phip_uri, p, cfg)
         remote = _resolve_remote(args.remote)
     except SystemExit as e:
         print(str(e), file=sys.stderr)
@@ -66,10 +71,10 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         if args.all:
-            events = list(iter_history(remote, args.phip_uri))
-            obj = get_object(remote, args.phip_uri, history=0)
+            events = list(iter_history(remote, phip_uri))
+            obj = get_object(remote, phip_uri, history=0)
         else:
-            obj = get_object(remote, args.phip_uri, history=args.limit)
+            obj = get_object(remote, phip_uri, history=args.limit)
             events = obj.get("history") or []
     except HTTPError as e:
         print(

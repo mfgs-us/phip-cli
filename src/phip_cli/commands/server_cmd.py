@@ -24,6 +24,7 @@ from phip_cli.http import (
 from phip_cli.identity import load_identity
 from phip_cli.output import add_format_flag, emit
 from phip_cli.remote import Remote, load_remote
+from phip_cli.uri import expand
 
 
 def _resolve_remote(remote_arg: str | None) -> Remote:
@@ -58,11 +59,17 @@ def add(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     c = sub.add_parser("create", help="Push a signed `created` event to the remote.")
     c.add_argument("event_file", help="Path to a JSON file with the signed event, or - for stdin.")
     c.add_argument("--remote")
+    c.add_argument(
+        "--dry-run", action="store_true", help="Print the event that would be sent; don't POST."
+    )
     c.set_defaults(func=run_create)
 
     pu = sub.add_parser("push", help="Push a signed event to the remote.")
     pu.add_argument("event_file", help="Path to a JSON file with the signed event, or - for stdin.")
     pu.add_argument("--remote")
+    pu.add_argument(
+        "--dry-run", action="store_true", help="Print the event that would be sent; don't POST."
+    )
     pu.set_defaults(func=run_push)
 
     q = sub.add_parser("query", help="Query objects in a namespace on the remote.")
@@ -134,13 +141,20 @@ def _emit_or_error(fn: Callable[..., Any], fmt: str, table_args: dict[str, Any] 
 
 
 def run_get(args: argparse.Namespace) -> int:
+    p = paths()
+    cfg = load_config(p)
+    try:
+        uri = expand(args.uri, p, cfg)
+    except SystemExit as e:
+        print(str(e), file=sys.stderr)
+        return 2
     rem = _resolve_remote(args.remote)
     table_rows = None
     table_columns = None
     if args.format == "table":
         # For an object response, project the history list as the table.
         try:
-            obj = get_object(rem, args.uri, history=args.history)
+            obj = get_object(rem, uri, history=args.history)
         except HTTPError as e:
             print(
                 f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
@@ -166,24 +180,35 @@ def run_get(args: argparse.Namespace) -> int:
         print()
         emit(obj, "table", table_rows=table_rows, table_columns=table_columns)
         return 0
-    return _emit_or_error(get_object, args.format, None, rem, args.uri, history=args.history)
+    return _emit_or_error(get_object, args.format, None, rem, uri, history=args.history)
 
 
 def run_history(args: argparse.Namespace) -> int:
+    p = paths()
+    cfg = load_config(p)
+    try:
+        uri = expand(args.uri, p, cfg)
+    except SystemExit as e:
+        print(str(e), file=sys.stderr)
+        return 2
     rem = _resolve_remote(args.remote)
     if args.all:
         try:
-            events = list(iter_history(rem, args.uri, page_size=args.limit))
+            events = list(iter_history(rem, uri, page_size=args.limit))
         except HTTPError as e:
             print(
                 f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
                 file=sys.stderr,
             )
             return 1
-        body = {"phip_id": args.uri, "history_length": len(events), "events": events}
+        body: dict[str, Any] = {
+            "phip_id": uri,
+            "history_length": len(events),
+            "events": events,
+        }
     else:
         try:
-            body = get_history(rem, args.uri, limit=args.limit, cursor=args.cursor)
+            body = get_history(rem, uri, limit=args.limit, cursor=args.cursor)
         except HTTPError as e:
             print(
                 f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
@@ -219,6 +244,9 @@ def run_create(args: argparse.Namespace) -> int:
     except ValueError as e:
         print(f"event.phip_id is not a valid PhIP URI: {e}", file=sys.stderr)
         return 2
+    if args.dry_run:
+        print(json.dumps(event, indent=2))
+        return 0
     return _wrap_http(create_object, rem, parsed.namespace, event)
 
 
@@ -229,6 +257,9 @@ def run_push(args: argparse.Namespace) -> int:
     if not phip_id:
         print("event has no phip_id", file=sys.stderr)
         return 2
+    if args.dry_run:
+        print(json.dumps(event, indent=2))
+        return 0
     return _wrap_http(push_event, rem, phip_id, event)
 
 

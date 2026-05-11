@@ -53,23 +53,35 @@ class Config:
 
     default_identity: str | None = None
     default_remote: str | None = None
+    default_authority: str | None = None
+    default_namespace: str | None = None
     extras: dict[str, object] = field(default_factory=dict)
+
+    KNOWN_FIELDS = (
+        "default_identity",
+        "default_remote",
+        "default_authority",
+        "default_namespace",
+    )
 
     def to_dict(self) -> dict[str, object]:
         out: dict[str, object] = {}
-        if self.default_identity is not None:
-            out["default_identity"] = self.default_identity
-        if self.default_remote is not None:
-            out["default_remote"] = self.default_remote
+        for f in self.KNOWN_FIELDS:
+            v = getattr(self, f)
+            if v is not None:
+                out[f] = v
         out.update(self.extras)
         return out
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> Config:
+        kwargs: dict[str, object] = {}
+        for f in cls.KNOWN_FIELDS:
+            if d.get(f) is not None:
+                kwargs[f] = d[f]
         return cls(
-            default_identity=d.get("default_identity"),  # type: ignore[arg-type]
-            default_remote=d.get("default_remote"),  # type: ignore[arg-type]
-            extras={k: v for k, v in d.items() if k not in {"default_identity", "default_remote"}},
+            extras={k: v for k, v in d.items() if k not in cls.KNOWN_FIELDS},
+            **kwargs,  # type: ignore[arg-type]
         )
 
 

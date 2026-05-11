@@ -19,8 +19,10 @@ from typing import Any
 from phip import hash_event, public_key_from_jwk, verify_event
 
 from phip_cli.commands.server_cmd import _resolve_remote
+from phip_cli.config import load_config, paths
 from phip_cli.http import HTTPError, get_object, iter_history
 from phip_cli.remote import Remote
+from phip_cli.uri import expand
 
 
 def add(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -73,7 +75,10 @@ def _resolve_actor_jwk(
 
 
 def run(args: argparse.Namespace) -> int:
+    p = paths()
+    cfg = load_config(p)
     try:
+        phip_uri = expand(args.phip_uri, p, cfg)
         remote = _resolve_remote(args.remote)
     except SystemExit as e:
         print(str(e), file=sys.stderr)
@@ -85,7 +90,7 @@ def run(args: argparse.Namespace) -> int:
     cache: dict[str, dict[str, Any] | None] = {}
 
     try:
-        events = list(iter_history(remote, args.phip_uri))
+        events = list(iter_history(remote, phip_uri))
     except HTTPError as e:
         print(
             f"server returned {e.status_code} {e.code or ''}: {e.message}".strip(),
@@ -126,7 +131,7 @@ def run(args: argparse.Namespace) -> int:
                 f"event #{i} ({ev_short}): signature verification failed"
             )
 
-    print(f"{args.phip_uri}")
+    print(f"{phip_uri}")
     print(f"  events checked: {checked}")
     print(f"  events passed:  {checked - len(failures)}")
     if failures:

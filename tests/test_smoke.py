@@ -760,3 +760,317 @@ def test_meta_yaml(home: Path, httpx_mock, capsys: pytest.CaptureFixture) -> Non
     out = capsys.readouterr().out
     assert "authority: acme.example" in out
     assert "protocol_versions:" in out
+
+
+# ── Round 2: --version, config, object/transition/relate, token, schema, dry-run ──
+
+
+def test_version(capsys: pytest.CaptureFixture) -> None:
+    """`phip --version` exits 0 and prints something with 'phip-cli'."""
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "phip-cli" in out
+
+
+def test_config_get_set_unset(home: Path, capsys: pytest.CaptureFixture) -> None:
+    assert main(["init", "--authority", "test.local"]) == 0
+    capsys.readouterr()
+    assert main(["config", "set", "default_namespace", "parts"]) == 0
+    capsys.readouterr()
+    assert main(["config", "get", "default_namespace"]) == 0
+    assert capsys.readouterr().out.strip() == "parts"
+    capsys.readouterr()
+    assert main(["config", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "default_namespace" in out
+    assert "parts" in out
+    assert main(["config", "unset", "default_namespace"]) == 0
+    rc = main(["config", "get", "default_namespace"])
+    assert rc == 1
+
+
+@pytest.mark.asyncio
+async def test_object_new_dry_run(home: Path, capsys: pytest.CaptureFixture) -> None:
+    """object new --dry-run signs but never POSTs (no httpx_mock needed)."""
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "object", "new",
+                "component",
+                "phip://test.local/parts/widget-001",
+                "--state", "concept",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    ev = json.loads(out)
+    assert ev["type"] == "created"
+    assert ev["phip_id"] == "phip://test.local/parts/widget-001"
+    assert ev["payload"]["object_type"] == "component"
+    assert ev["payload"]["state"] == "concept"
+    assert "signature" in ev
+
+
+@pytest.mark.asyncio
+async def test_object_new_with_shorthand(
+    home: Path, httpx_mock, capsys: pytest.CaptureFixture
+) -> None:
+    """Shorthand id is expanded against default authority + namespace."""
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    main(["config", "set", "default_namespace", "parts"])
+    capsys.readouterr()
+
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/objects/parts",
+        method="POST",
+        json={
+            "phip_id": "phip://acme.example/parts/widget-001",
+            "head_hash": "sha256:x",
+            "history_length": 1,
+        },
+    )
+    assert main(["object", "new", "component", "widget-001"]) == 0
+    out = capsys.readouterr().out
+    assert "Created phip://acme.example/parts/widget-001" in out
+
+
+@pytest.mark.asyncio
+async def test_transition_dry_run(home: Path, httpx_mock, capsys: pytest.CaptureFixture) -> None:
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+
+    # Mock the head fetch even though --dry-run.
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/resolve/parts/widget-001?history=0",
+        json={
+            "phip_id": "phip://acme.example/parts/widget-001",
+            "object_type": "component",
+            "state": "concept",
+            "head_hash": "sha256:abc",
+            "history_length": 1,
+            "history": [],
+        },
+    )
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "transition",
+                "phip://acme.example/parts/widget-001",
+                "--to", "qualified",
+                "--reason", "passed FAI",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    ev = json.loads(capsys.readouterr().out)
+    assert ev["type"] == "transitioned"
+    assert ev["payload"]["to"] == "qualified"
+    assert ev["payload"]["reason"] == "passed FAI"
+    assert ev["previous_hash"] == "sha256:abc"
+
+
+@pytest.mark.asyncio
+async def test_relate_dry_run(home: Path, httpx_mock, capsys: pytest.CaptureFixture) -> None:
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    httpx_mock.add_response(
+        url="https://acme.example/.well-known/phip/resolve/racks/rack-007?history=0",
+        json={
+            "phip_id": "phip://acme.example/racks/rack-007",
+            "object_type": "fixture",
+            "state": "deployed",
+            "head_hash": "sha256:r",
+            "history_length": 1,
+            "history": [],
+        },
+    )
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "relate",
+                "phip://acme.example/racks/rack-007",
+                "phip://quanta.com/servers/Q88421",
+                "--type", "contains",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    ev = json.loads(capsys.readouterr().out)
+    assert ev["type"] == "relation_added"
+    assert ev["payload"]["relation"]["type"] == "contains"
+    assert ev["payload"]["relation"]["phip_id"] == "phip://quanta.com/servers/Q88421"
+
+
+# ── Token suite ──────────────────────────────────────────────────────
+
+
+def test_token_mint_decode_verify(home: Path, capsys: pytest.CaptureFixture) -> None:
+    assert main(["init", "--authority", "test.local"]) == 0
+
+    # Mint
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "token", "mint",
+                "--scope", "read_state",
+                "--object", "phip://test.local/parts/*",
+                "--granted-to", "phip://test.local/keys/bob",
+                "--ttl-hours", "1",
+            ]
+        )
+        == 0
+    )
+    encoded = capsys.readouterr().out.strip()
+    assert encoded  # base64url string
+
+    # Decode
+    capsys.readouterr()
+    assert main(["token", "decode", encoded]) == 0
+    decoded = json.loads(capsys.readouterr().out)
+    assert decoded["scope"] == "read_state"
+    assert decoded["object_filter"] == "phip://test.local/parts/*"
+    assert decoded["granted_to"] == "phip://test.local/keys/bob"
+    assert "signature" in decoded
+
+    # Verify (against the local default identity that signed it)
+    capsys.readouterr()
+    assert main(["token", "verify", encoded, "--against", "default"]) == 0
+    out = capsys.readouterr().out
+    assert '"verified": true' in out
+
+
+def test_token_verify_tampered(home: Path, capsys: pytest.CaptureFixture) -> None:
+    """Tamper with the b64url payload → verify must fail."""
+    import base64
+
+    assert main(["init", "--authority", "test.local"]) == 0
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "token", "mint",
+                "--scope", "read_state",
+                "--object", "*",
+                "--granted-to", "phip://test.local/keys/bob",
+            ]
+        )
+        == 0
+    )
+    encoded = capsys.readouterr().out.strip()
+
+    # Decode, mutate the granted_to, re-encode without re-signing.
+    pad = (-len(encoded)) % 4
+    raw = base64.urlsafe_b64decode(encoded + ("=" * pad))
+    tok = json.loads(raw.decode("utf-8"))
+    tok["granted_to"] = "phip://attacker.example/keys/eve"
+    tampered = base64.urlsafe_b64encode(
+        json.dumps(tok, separators=(",", ":"), sort_keys=True).encode()
+    ).rstrip(b"=").decode()
+
+    capsys.readouterr()
+    rc = main(["token", "verify", tampered, "--against", "default"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert '"verified": false' in out
+
+
+def test_token_use_updates_remote_bearer(
+    home: Path, capsys: pytest.CaptureFixture
+) -> None:
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    # Mint a real-shaped token to install.
+    capsys.readouterr()
+    main(
+        [
+            "token", "mint",
+            "--scope", "push_events",
+            "--object", "*",
+            "--granted-to", "phip://test.local/keys/default",
+        ]
+    )
+    encoded = capsys.readouterr().out.strip()
+
+    assert main(["token", "use", encoded, "--remote", "origin"]) == 0
+    remotes = json.loads((home / "remotes.json").read_text("utf-8"))
+    assert remotes[0]["token"] == encoded
+
+
+# ── Schema validate ──────────────────────────────────────────────────
+
+
+def test_schema_list_show(home: Path, capsys: pytest.CaptureFixture) -> None:
+    capsys.readouterr()
+    assert main(["schema", "list"]) == 0
+    out = capsys.readouterr().out
+    # We vendored the spec schemas; at least these should be present.
+    for name in ("core", "capability-token", "bundle-manifest"):
+        assert name in out
+
+    capsys.readouterr()
+    assert main(["schema", "show", "core"]) == 0
+    schema = json.loads(capsys.readouterr().out)
+    assert schema.get("$schema") or schema.get("type") or schema.get("$id")
+
+
+def test_schema_validate_unknown_schema(
+    home: Path, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    f = tmp_path / "x.json"
+    f.write_text("{}", encoding="utf-8")
+    rc = main(["schema", "validate", str(f), "--schema", "no-such-schema"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "no-such-schema" in err
+
+
+# ── --dry-run on push / create ───────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_push_dry_run_does_not_call_server(
+    home: Path, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """No httpx_mock: dry-run must not make a request, otherwise pytest-httpx will complain."""
+    assert main(["init", "--authority", "test.local", "--remote", "https://acme.example"]) == 0
+    ev = {
+        "event_id": "abc",
+        "phip_id": "phip://acme.example/parts/widget-001",
+        "type": "measurement",
+        "timestamp": "2026-05-10T20:00:00Z",
+        "actor": "phip://test.local/keys/default",
+        "previous_hash": "sha256:zzz",
+        "payload": {"metric": "x", "as_of": "2026-05-10T20:00:00Z"},
+        "signature": {
+            "algorithm": "Ed25519",
+            "key_id": "phip://test.local/keys/default",
+            "value": "0" * 88,
+        },
+    }
+    f = tmp_path / "ev.json"
+    f.write_text(json.dumps(ev), encoding="utf-8")
+    capsys.readouterr()
+    assert main(["push", str(f), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "widget-001" in out
+    assert "measurement" in out
+
+
+# ── Shell completion ────────────────────────────────────────────────
+
+
+def test_completion_bash(capsys: pytest.CaptureFixture) -> None:
+    assert main(["completion", "bash"]) == 0
+    out = capsys.readouterr().out
+    # shtab emits a bash function definition; whatever the exact form,
+    # it should at least mention "phip" and "complete" or "compgen".
+    assert "phip" in out
+    assert ("compgen" in out or "complete" in out or "_phip" in out)

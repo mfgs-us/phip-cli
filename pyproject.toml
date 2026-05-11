@@ -26,6 +26,8 @@ dependencies = [
     "phip>=0.1.0a2",
     "httpx>=0.27",
     "PyYAML>=6.0",
+    "jsonschema>=4.20",
+    "shtab>=1.7",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +47,9 @@ phip = "phip_cli.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+phip_cli = ["_schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -68,5 +73,5 @@ warn_return_any = false
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["yaml"]
+module = ["yaml", "shtab", "jsonschema", "jsonschema.*"]
 ignore_missing_imports = true
