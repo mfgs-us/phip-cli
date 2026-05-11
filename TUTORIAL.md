@@ -268,9 +268,17 @@ Catch malformed events before they hit the server:
 
 ```bash
 phip schema list
-phip schema validate signed_event.json --schema core
+# Validate a single signed event
+phip schema validate signed_event.json --schema event
+# Validate a full resolved object response
+phip schema validate phip_get_output.json --schema object
+# Validate a decoded capability token
 phip schema validate token.json --schema capability-token
 ```
+
+The `event` and `object` names are convenience aliases over `core.json`'s
+`$defs/event` and the core object itself respectively — both validate
+without needing to know JSON Schema `$ref` syntax.
 
 ## What's next
 

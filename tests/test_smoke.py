@@ -1037,6 +1037,45 @@ def test_schema_validate_unknown_schema(
     assert "no-such-schema" in err
 
 
+def test_schema_event_alias_validates_signed_event(
+    home: Path, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The `event` alias lifts core.json's $defs/event so users can
+    validate a single signed event without learning JSON Schema $refs."""
+    assert main(["init", "--authority", "test.local"]) == 0
+
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "event", "new",
+                "--phip-id", "phip://test.local/parts/widget-001",
+                "--type", "created",
+                "--previous-hash", "genesis",
+                "--payload", '{"object_type":"component","state":"concept"}',
+            ]
+        )
+        == 0
+    )
+    unsigned_json = capsys.readouterr().out
+    unsigned = tmp_path / "unsigned.json"
+    unsigned.write_text(unsigned_json, encoding="utf-8")
+    capsys.readouterr()
+    assert main(["event", "sign", str(unsigned)]) == 0
+    signed = tmp_path / "signed.json"
+    signed.write_text(capsys.readouterr().out, encoding="utf-8")
+
+    # Listed as a known schema name.
+    capsys.readouterr()
+    assert main(["schema", "list"]) == 0
+    assert "event" in capsys.readouterr().out.split()
+
+    # Validates a real signed event.
+    capsys.readouterr()
+    assert main(["schema", "validate", str(signed), "--schema", "event"]) == 0
+    assert capsys.readouterr().out.strip() == "OK"
+
+
 # ── --dry-run on push / create ───────────────────────────────────────
 
 

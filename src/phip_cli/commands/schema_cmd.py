@@ -15,11 +15,35 @@ _SCHEMA_PACKAGE = "phip_cli._schemas"
 
 def _list_schema_files() -> list[str]:
     files = resources.files(_SCHEMA_PACKAGE)
-    return sorted(p.name.removesuffix(".json") for p in files.iterdir() if p.name.endswith(".json"))
+    on_disk = sorted(
+        p.name.removesuffix(".json") for p in files.iterdir() if p.name.endswith(".json")
+    )
+    return sorted({*on_disk, *_ALIASES.keys()})
+
+
+_ALIASES = {
+    # `event` validates a single signed event by lifting core.json's
+    # $defs/event into a self-contained schema (refs in the subschema
+    # resolve against the embedded $defs map).
+    "event": ("core", "event"),
+    # `object` is the default reading of `core` — full resolved object
+    # with phip_id / object_type / state / history.
+    "object": ("core", None),
+}
 
 
 def _load_schema(name: str) -> dict[str, object]:
     files = resources.files(_SCHEMA_PACKAGE)
+    if name in _ALIASES:
+        base_name, defs_key = _ALIASES[name]
+        base = json.loads((files / f"{base_name}.json").read_text(encoding="utf-8"))
+        if defs_key is None:
+            return base
+        defs = base.get("$defs", {})
+        if defs_key not in defs:
+            raise FileNotFoundError(f"{name} (alias to {base_name}#/$defs/{defs_key}; missing)")
+        # Re-export the subschema with the original $defs so internal refs resolve.
+        return {**defs[defs_key], "$defs": defs}
     target = files / f"{name}.json"
     if not target.is_file():
         raise FileNotFoundError(name)
